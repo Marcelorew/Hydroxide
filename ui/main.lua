@@ -1,6 +1,7 @@
 local CoreGui = game:GetService("CoreGui")
 local UserInput = game:GetService("UserInputService")
 local HttpService = game:GetService("HttpService")
+local Camera = workspace.CurrentCamera
 
 local Interface = import("rbxassetid://11389137937")
 
@@ -38,18 +39,75 @@ end, function(err)
 	end)
 end)
 
-local constants = {
-	opened = UDim2.new(0.5, -325, 0.5, -175),
-	closed = UDim2.new(0.5, -325, 0, -400),
-	reveal = UDim2.new(0.5, -15, 0, 20),
-	conceal = UDim2.new(0.5, -15, 0, -75)
-}
-
 local Open = Interface.Open
 local Base = Interface.Base
 local Drag = Base.Drag
 local Status = Base.Status
 local Collapse = Drag.Collapse
+
+local BASE_WIDTH = 650
+local BASE_HEIGHT = 350
+local MIN_SCALE = 0.38
+local MAX_SCALE = 1
+
+local isTouch = UserInput.TouchEnabled
+local isMobile = isTouch and not UserInput.MouseEnabled
+
+local UIScale = Instance.new("UIScale")
+UIScale.Name = "MobileScale"
+UIScale.Scale = 1
+UIScale.Parent = Base
+
+local currentScale = 1
+local constants
+
+local function buildConstants(scale)
+	local halfWidth = (BASE_WIDTH * scale) / 2
+	local halfHeight = (BASE_HEIGHT * scale) / 2
+
+	return {
+		opened = UDim2.new(0.5, -halfWidth, 0.5, -halfHeight),
+		closed = UDim2.new(0.5, -halfWidth, 0, -(BASE_HEIGHT * scale) - 50),
+		reveal = UDim2.new(0.5, -15, 0, 20),
+		conceal = UDim2.new(0.5, -15, 0, -75)
+	}
+end
+
+local function clampToViewport()
+	local viewport = Camera.ViewportSize
+	local halfHeight = (BASE_HEIGHT * currentScale) / 2
+
+	local pos = Base.Position
+	local targetX = math.clamp(pos.X.Offset, -viewport.X * 0.5 + 20, viewport.X * 0.5 - 20)
+	local targetY = math.clamp(pos.Y.Offset, -halfHeight, viewport.Y - halfHeight * 0.6)
+
+	Base.Position = UDim2.new(pos.X.Scale, targetX, pos.Y.Scale, targetY)
+end
+
+local function applyScale(scale, tween)
+	currentScale = math.clamp(scale, MIN_SCALE, MAX_SCALE)
+
+	if tween then
+		game:GetService("TweenService"):Create(UIScale, TweenInfo.new(0.12, Enum.EasingStyle.Quad), {Scale = currentScale}):Play()
+	else
+		UIScale.Scale = currentScale
+	end
+
+	constants = buildConstants(currentScale)
+end
+
+local function computeInitialScale()
+	if not isMobile then
+		return 1
+	end
+
+	local viewport = Camera.ViewportSize
+	local shortSide = math.min(viewport.X, viewport.Y)
+
+	return math.clamp((shortSide * 0.94) / BASE_WIDTH, MIN_SCALE, MAX_SCALE)
+end
+
+applyScale(computeInitialScale(), false)
 
 function oh.setStatus(text)
 	Status.Text = '• Status: ' .. text
@@ -63,8 +121,13 @@ local dragging
 local dragStart
 local startPos
 
+local function isDragInput(input)
+	return input.UserInputType == Enum.UserInputType.MouseButton1
+		or input.UserInputType == Enum.UserInputType.Touch
+end
+
 Drag.InputBegan:Connect(function(input)
-	if input.UserInputType == Enum.UserInputType.MouseButton1 then
+	if isDragInput(input) then
 		local dragEnded 
 
 		dragging = true
@@ -72,8 +135,9 @@ Drag.InputBegan:Connect(function(input)
 		startPos = Base.Position
 
 		dragEnded = input.Changed:Connect(function()
-			if input.UserInputState == Enum.UserInputState.End then
+			if input.UserInputState == Enum.UserInputState.End or input.UserInputState == Enum.UserInputState.Cancel then
 				dragging = false
+				clampToViewport()
 				dragEnded:Disconnect()
 			end
 		end)
@@ -81,10 +145,32 @@ Drag.InputBegan:Connect(function(input)
 end)
 
 oh.Events.Drag = UserInput.InputChanged:Connect(function(input)
-	if input.UserInputType == Enum.UserInputType.MouseMovement and dragging then
+	if dragging and isDragInput(input) then
 		local delta = input.Position - dragStart
 		Base.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
 	end
+end)
+
+if isTouch then
+	local pinchStartScale
+
+	oh.Events.Pinch = UserInput.TouchPinch:Connect(function(touchPositions, scale, velocity, state)
+		if state == Enum.UserInputState.Begin then
+			pinchStartScale = currentScale
+		elseif state == Enum.UserInputState.Change and pinchStartScale then
+			applyScale(pinchStartScale * scale, false)
+		elseif state == Enum.UserInputState.End or state == Enum.UserInputState.Cancel then
+			pinchStartScale = nil
+			clampToViewport()
+		end
+	end)
+end
+
+Camera:GetPropertyChangedSignal("ViewportSize"):Connect(function()
+	if isMobile then
+		applyScale(computeInitialScale(), true)
+	end
+	clampToViewport()
 end)
 
 Open.MouseButton1Click:Connect(function()
@@ -92,7 +178,20 @@ Open.MouseButton1Click:Connect(function()
 	Base:TweenPosition(constants.opened, "Out", "Quad", 0.15)
 end)
 
+local closePressStart
+
+Collapse.MouseButton1Down:Connect(function()
+	closePressStart = tick()
+end)
+
 Collapse.MouseButton1Click:Connect(function()
+	local held = closePressStart and (tick() - closePressStart) or 0
+
+	if held >= 0.6 then
+		Interface:Destroy()
+		return
+	end
+
 	Base:TweenPosition(constants.closed, "Out", "Quad", 0.15)
 	Open:TweenPosition(constants.reveal, "Out", "Quad", 0.15)
 end)
@@ -107,5 +206,7 @@ else
 
 	Interface.Parent = CoreGui
 end
+
+Base.Position = constants.opened
 
 return Interface
